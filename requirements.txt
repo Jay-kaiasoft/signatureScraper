@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+beautifulsoup4
+lxml
+pydantic
+python-multipart
+phonenumbers   # optional but recommended for robust phone parsing
+SQLAlchemy
+pymysql
+python-dotenv
