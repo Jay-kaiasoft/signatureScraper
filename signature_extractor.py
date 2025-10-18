@@ -65,6 +65,83 @@ class ImprovedSignatureExtractor:
             "web","app","apps","cloud","online","corp","company"
         }
 
+    _MINI_ROLE_WORDS = {
+        "support","help","hello","contact","team","sales","marketing","info",
+        "noreply","no-reply","donotreply","newsletter","alerts","updates",
+        "admin","hr","jobs","career","careers","billing","accounts"
+    }
+
+    def _cap(self, s: str) -> str:
+        s = s.strip()
+        return s if not s else s[0].upper() + s[1:].lower()
+
+    def _looks_like_person(self, disp: str) -> bool:
+        # two tokens, mostly letters, no obvious role words
+        toks = [t for t in disp.strip().split() if any(c.isalpha() for c in t)]
+        if len(toks) < 2: 
+            return False
+        low = disp.lower()
+        if any(w in low for w in self._MINI_ROLE_WORDS):
+            return False
+        return True
+
+    def _split_local_simple(self, local: str) -> list[str]:
+        base = local.split('+', 1)[0]
+        parts = re.split(r'[._\-]+', base)
+        if len(parts) == 1 and re.search(r'[a-z][A-Z]', parts[0]):  # camelCase → "John Doe"
+            parts = re.sub(r'([a-z])([A-Z])', r'\1 \2', parts[0]).split()
+        parts = [re.sub(r'^\d+|\d+$', '', p) for p in parts]        # trim edge digits
+        parts = [p for p in parts if re.search(r'[A-Za-z]', p)]     # keep alphabetic-ish
+        return parts
+
+    def _is_role_local(self, local: str) -> bool:
+        base = local.split('+', 1)[0].lower()
+        bits = re.split(r'[._\-]+', base)
+        return any(b in self._MINI_ROLE_WORDS for b in bits)
+
+    def _name_from_email_simple(self, email_addr: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        if not email_addr or '@' not in email_addr:
+            return None, None, None
+        local, _ = email_addr.split('@', 1)
+        if self._is_role_local(local):
+            return None, None, None
+
+        parts = self._split_local_simple(local)
+        if not parts:
+            return None, None, None
+
+        if len(parts) == 1:
+            first = self._cap(parts[0])
+            last  = None
+        else:
+            first = self._cap(parts[0])
+            last  = self._cap(parts[-1])
+
+        # SAFE full name (no str+None)
+        full = " ".join([p for p in [first, last] if p]) or None
+        return first, last, full
+
+
+    def _simple_name_from_header_or_email(self, sender_header: Optional[str], fallback_email: Optional[str]):
+        # 1) Try display name
+        if sender_header:
+            disp, addr = parseaddr(sender_header)
+            disp = disp.strip(' "\'|,;()[]')
+            if self._looks_like_person(disp):
+                toks = [t for t in disp.split() if any(c.isalpha() for c in t)]
+                if toks:
+                    first = self._cap(toks[0])
+                    last  = self._cap(toks[-1]) if len(toks) > 1 else None
+                    full  = " ".join([p for p in [first, last] if p]) or None
+                    return first, last, full
+            if not fallback_email and addr:
+                fallback_email = addr
+
+        # 2) Fallback to email local-part
+        return self._name_from_email_simple(fallback_email)
+
+
+
     # ---------- helpers ----------
     def _text_has(self, s: str, words: Iterable[str]) -> bool:
         sl = s.lower()
@@ -582,10 +659,22 @@ class ImprovedSignatureExtractor:
         job_title = self.extract_job_title(sig_lines)
         address = self.extract_address(sig_lines)
 
+    # add inside ImprovedSignatureExtractor (near your other helpers)
+        def _compose_full(self, first: Optional[str], last: Optional[str]) -> Optional[str]:
+            if first and last:
+                return f"{first} {last}"
+            return first or last  # could be None if both are None
+
         # Sender email fallback
         email_addr = sender_email if sender_email else (emails[0] if emails else None)
 
+        # SIMPLE name extraction
+        # first_name, last_name, full_name = self._simple_name_from_header_or_email(sender_header, email_addr)
+        first_name, last_name, full_name = self._simple_name_from_header_or_email(sender_header, email_addr)
+
         return {
+            "firstName": first_name,
+            "lastName": last_name,
             "emailAddress": email_addr,
             "companyName": company_name,
             "jobTitle": job_title,

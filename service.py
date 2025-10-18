@@ -133,6 +133,8 @@ def save_results(job_id: int, results: list[dict]):
                 phone=r.get("phoneNumber"),
                 address=r.get("address"),
                 website=r.get("website"),
+                first_name=r.get("firstName"),
+                last_name=r.get("lastName") 
             )
             s.add(row)
 

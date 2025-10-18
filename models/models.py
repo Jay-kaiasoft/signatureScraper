@@ -53,6 +53,8 @@ class SignatureResult(Base):
     phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     created_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     created_by: Mapped[int] = mapped_column(ForeignKey("customers.cus_id"), index=True)
