@@ -111,7 +111,7 @@ def save_results(job_id: int, results: list[dict]):
         if not req:
             print(f"[WARN] EmailFetchRequest id={job_id} not found; skipping save.")
             return
-
+        
         for r in results:
             row = SignatureResult(
                 request_id=job_id,
@@ -132,13 +132,9 @@ def save_results(job_id: int, results: list[dict]):
             s.add(row)
 
 def purge_deleted_results():
-    """
-    For each SignatureResult marked is_deleted=True, delete the original email
-    from the user's mailbox using credentials stored on the parent EmailFetchRequest.
-    """
     print("[PURGE] Checking for messages to delete...")
 
-    # 1) Load all flagged rows + their request details in one pass
+    # Step 1: read everything we need first
     with session_scope() as s:
         rows = (
             s.execute(
@@ -149,75 +145,51 @@ def purge_deleted_results():
             .all()
         )
 
-    if not rows:
+        payload = []
+        for sig, req in rows:
+            payload.append({
+                "sig_id": sig.id,
+                "req_id": req.id,
+                "mailbox": sig.mailbox or "INBOX",
+                "host": req.imap_host,
+                "port": req.imap_port or 993,
+                "user": req.email,
+                "password": req.password,
+                "uid": sig.message_uid,
+                "mid": sig.message_id,
+            })
+
+    if not payload:
         print("[PURGE] Nothing to delete.")
         return
 
-    # 2) Group by (request_id, mailbox) for efficient logins
-    from collections import defaultdict
-    groups = defaultdict(lambda: {"req": None, "uids": [], "mids": [], "mailbox": "INBOX"})
-
-    for sig, req in rows:
-        key = (sig.request_id, sig.mailbox or "INBOX")
-        g = groups[key]
-        g["req"] = req
-        g["mailbox"] = sig.mailbox or "INBOX"
-        if sig.message_uid is not None:
-            g["uids"].append(sig.message_uid)
-        elif sig.message_id:
-            g["mids"].append(sig.message_id)
-
-    total_deleted = 0
-
-    # 3) Execute deletions per group
-    for (req_id, mailbox), g in groups.items():
-        req: EmailFetchRequest = g["req"]
-        uids = g["uids"]
-        mids = g["mids"]
-        mbx = g["mailbox"]
-
+    # Step 2: group and delete from IMAP
+    deleted_sig_ids = []
+    for item in payload:
         try:
-            deleted_here = 0
-            if uids:
-                deleted_here += scraper.delete_by_uid(
-                    host=req.imap_host,
-                    port=req.imap_port or 993,
-                    user=req.email,
-                    password=req.password,
-                    mailbox=mbx,
-                    uids=uids,
+            if item["uid"]:
+                scraper.delete_by_uid(
+                    host=item["host"], port=item["port"],
+                    user=item["user"], password=item["password"],
+                    mailbox=item["mailbox"], uids=[item["uid"]],
                 )
-            if mids:
-                deleted_here += scraper.delete_by_message_id(
-                    host=req.imap_host,
-                    port=req.imap_port or 993,
-                    user=req.email,
-                    password=req.password,
-                    mailbox=mbx,
-                    message_ids=mids,
+            elif item["mid"]:
+                scraper.delete_by_message_id(
+                    host=item["host"], port=item["port"],
+                    user=item["user"], password=item["password"],
+                    mailbox=item["mailbox"], message_ids=[item["mid"]],
                 )
-            print(f"[PURGE] Request {req_id} @{mbx} — deleted {deleted_here} messages.")
-            total_deleted += deleted_here
-
-            # 4) DB cleanup for the purged SignatureResult rows
-            #    Option A: hard-delete the signature rows
-            with session_scope() as s:
-                stmt = (
-                    select(SignatureResult.id)
-                    .where(SignatureResult.request_id == req_id, SignatureResult.is_deleted == True)  # noqa: E712
-                )
-                ids = [r[0] for r in s.execute(stmt).all()]
-                if ids:
-                    s.execute(
-                        delete(SignatureResult).where(SignatureResult.id.in_(ids))
-                    )
-
-            #    Option B (alternative): just mark them with purged_at instead of deleting
-
+            deleted_sig_ids.append(item["sig_id"])
         except Exception as e:
-            print(f"[PURGE] Error purging request {req_id} @{mbx}: {type(e).__name__}: {e}")
+            print(f"[PURGE] Error deleting message {item['uid'] or item['mid']}: {e}")
 
-    print(f"[PURGE] Total deleted this cycle: {total_deleted}")
+    # Step 3: delete successfully purged rows from DB
+    if deleted_sig_ids:
+        with session_scope() as s:
+            s.query(SignatureResult).filter(SignatureResult.id.in_(deleted_sig_ids)).delete(synchronize_session=False)
+        print(f"[PURGE] Deleted {len(deleted_sig_ids)} rows from DB")
+
+
 
 
 # -------------------------

@@ -19,7 +19,10 @@ if not DATABASE_URL:
 # echo=True for SQL debug
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+# SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+# db.py (where you build SessionLocal)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
 
 @contextmanager
 def session_scope():

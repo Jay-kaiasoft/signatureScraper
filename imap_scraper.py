@@ -1,9 +1,109 @@
 import imaplib
-import email
-from email.header import decode_header
-from typing import List
 from signature_extractor import ImprovedSignatureExtractor
-from typing import Iterable
+from email.header import decode_header, make_header
+from typing import List, Dict, Optional, Tuple,Iterable
+import email
+
+
+def _decode_header_value(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value))).strip()
+    except Exception:
+        return value.strip()
+
+def _walk_parts_for_bodies(msg: email.message.Message) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (html_body, text_body) as strings (or None). We don't set \Seen.
+    """
+    html_body = None
+    text_body = None
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = (part.get_content_type() or "").lower()
+            if part.get_content_maintype() == "multipart":
+                continue
+            if part.get("Content-Disposition", "").lower().startswith("attachment"):
+                continue
+
+            try:
+                payload = part.get_payload(decode=True)
+            except Exception:
+                payload = None
+
+            if not payload:
+                continue
+
+            charset = (part.get_content_charset() or "utf-8").strip("'\"").lower()
+            try:
+                text = payload.decode(charset, errors="replace")
+            except Exception:
+                # fallback if the declared charset is bogus
+                text = payload.decode("utf-8", errors="replace")
+
+            if ctype == "text/html" and html_body is None:
+                html_body = text
+            elif ctype == "text/plain" and text_body is None:
+                text_body = text
+    else:
+        # single-part message
+        payload = msg.get_payload(decode=True) or b""
+        charset = (msg.get_content_charset() or "utf-8").strip("'\"").lower()
+        try:
+            text = payload.decode(charset, errors="replace")
+        except Exception:
+            text = payload.decode("utf-8", errors="replace")
+
+        ctype = (msg.get_content_type() or "").lower()
+        if ctype == "text/html":
+            html_body = text
+        else:
+            text_body = text
+
+    return html_body, text_body
+
+def _html_to_text(html: str) -> str:
+    # tiny inline converter to avoid extra deps; replace with html2text if you prefer
+    try:
+        # lazy import to keep module import cheap
+        from bs4 import BeautifulSoup  # type: ignore
+        soup = BeautifulSoup(html, "html.parser")
+        # drop scripts/styles
+        for tag in soup(["script", "style", "meta", "link", "head"]):
+            tag.decompose()
+        return soup.get_text(separator="\n")
+    except Exception:
+        # worst case, strip tags crudely
+        import re
+        return re.sub(r"<[^>]+>", " ", html)
+    
+def _naive_signature_extract(body_text: str) -> Dict[str, Optional[str]]:
+    """
+    Minimal fallback extractor so this function is self-contained.
+    Replace with your signature_extractor module if available.
+    """
+    import re
+    email_pat = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+    phone_pat = re.compile(r"(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3,4}[\s.-]?\d{3,4}")
+    website_pat = re.compile(r"(?:https?://)?(?:www\.)?[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:/[^\s]*)?")
+
+    email_addr = next(iter(email_pat.findall(body_text)), None)
+    phone = next(iter(phone_pat.findall(body_text)), None)
+    website = next(iter(website_pat.findall(body_text)), None)
+
+    return {
+        "emailAddress": email_addr,
+        "companyName": None,
+        "jobTitle": None,
+        "phoneNumber": phone,
+        "address": None,
+        "website": website,
+        "firstName": None,
+        "lastName": None,
+    }
+
 
 class IMAPScraper:
     def __init__(self):
@@ -27,71 +127,92 @@ class IMAPScraper:
         password: str,
         imap_host: str,
         imap_port: int = 993,
-        max_messages: int = 10,
-    ) -> List[dict]:
+        mailbox: str = "INBOX",
+        search: str = "ALL",             # e.g. 'UNSEEN', 'ALL', '(SINCE 01-Oct-2025)'
+        max_messages: int = 200,
+        extractor=None,                  # optional override; otherwise uses self.extractor
+    ) -> List[Dict]:
         """
-        Connect to IMAP, fetch recent messages, extract signatures.
-        Returns: list of dicts with keys: subject, emailAddress, companyName, jobTitle,
-                 phoneNumber, address, website
+        Returns list of dicts:
+          { uid, messageId, mailbox,
+            emailAddress, companyName, jobTitle, phoneNumber, address, website,
+            firstName, lastName }
         """
-        mail = imaplib.IMAP4_SSL(imap_host, imap_port)
+        # login with the host/port you passed from the DB job
+        M = self._login(imap_host, imap_port, user_email, password)
         try:
-            mail.login(user_email, password)
-        except imaplib.IMAP4.error as e:
-            raise RuntimeError(
-                f"Authentication failed for {user_email}. "
-                f"Check host/port and use App Password if 2FA is enabled. ({str(e)})"
-            )
+            typ, _ = M.select(mailbox, readonly=True)
+            if typ != "OK":
+                return []
 
-        try:
-            mail.select("inbox")
-            status, data = mail.search(None, "ALL")
-            if status != "OK":
-                raise RuntimeError("Failed to fetch emails")
+            # use UID so we can delete later by UID
+            typ, data = M.uid("SEARCH", None, search)
+            if typ != "OK" or not data or not data[0]:
+                return []
 
-            email_ids = data[0].split()[-max_messages:]
-            results = []
+            uids = data[0].split()
+            if max_messages and max_messages > 0:
+                uids = uids[-max_messages:]
 
-            for e_id in reversed(email_ids):
-                status, msg_data = mail.fetch(e_id, "(RFC822)")
-                if status != "OK":
+            out: List[Dict] = []
+            for uid in uids:
+                typ, msg_data = M.uid("FETCH", uid, "(BODY.PEEK[] RFC822.HEADER)")
+                if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
                     continue
-                raw_email = msg_data[0][1]
-                msg = email.message_from_bytes(raw_email)
 
-                subject = self._decode_subject(msg)
+                raw = msg_data[0][1]
+                if not raw:
+                    continue
 
-                # Extract body (text/plain and text/html parts)
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        content_type = part.get_content_type()
-                        if content_type in ["text/plain", "text/html"]:
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                body += payload.decode(errors="ignore")
-                else:
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode(errors="ignore")
+                msg = email.message_from_bytes(raw)
 
-                signature = self.extractor.extract_signature(body, sender_header=msg.get("From"))
+                from_hdr   = _decode_header_value(msg.get("From"))
+                subject    = _decode_header_value(msg.get("Subject"))
+                message_id = (msg.get("Message-ID") or msg.get("Message-Id") or msg.get("Message-id") or "").strip() or None
 
-                # Fallback email from body if not found in header
-                if not signature.get("emailAddress"):
-                    body_emails = self.extractor.extract_emails(body)
-                    if body_emails:
-                        signature["emailAddress"] = body_emails[0]
+                html_body, text_body = _walk_parts_for_bodies(msg)
+                body_text = text_body or (_html_to_text(html_body) if html_body else "")
 
-                signature["subject"] = subject
-                results.append(signature)
+                # prefer the improved extractor; fall back to naive
+                parsed: Dict[str, Optional[str]] = {}
+                try:
+                    use_extractor = extractor or self.extractor
+                    if hasattr(use_extractor, "extract_signature"):
+                        # our ImprovedSignatureExtractor API
+                        parsed = use_extractor.extract_signature(
+                            raw_body=html_body or body_text,
+                            sender_header=from_hdr or None,
+                        ) or {}
+                    elif hasattr(use_extractor, "extract_from_email"):
+                        # legacy/custom API
+                        from_name, from_addr = email.utils.parseaddr(from_hdr)
+                        parsed = use_extractor.extract_from_email(
+                            html=html_body,
+                            text=body_text,
+                            from_name=from_name or None,
+                            from_addr=from_addr or None,
+                            subject=subject or None,
+                        ) or {}
+                except Exception:
+                    parsed = {}
 
-            return results
+                if not parsed:
+                    parsed = _naive_signature_extract(body_text)
+
+                out.append({
+                    "uid": int(uid),
+                    "messageId": message_id,
+                    "mailbox": mailbox,
+                    **parsed,
+                })
+
+            return out
         finally:
             try:
-                mail.logout()
+                M.close()
             except Exception:
                 pass
+            M.logout()
 
     def _login(self, host: str, port: int, user: str, password: str) -> imaplib.IMAP4_SSL:
         M = imaplib.IMAP4_SSL(host, port)
