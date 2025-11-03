@@ -1,14 +1,9 @@
-# imap_scraper.py
-"""
-IMAP fetcher that logs in, pulls the latest messages, and extracts signatures.
-Returns a list of dicts (subject + signature fields).
-"""
-
 import imaplib
 import email
 from email.header import decode_header
 from typing import List
 from signature_extractor import ImprovedSignatureExtractor
+from typing import Iterable
 
 class IMAPScraper:
     def __init__(self):
@@ -97,3 +92,46 @@ class IMAPScraper:
                 mail.logout()
             except Exception:
                 pass
+
+    def _login(self, host: str, port: int, user: str, password: str) -> imaplib.IMAP4_SSL:
+        M = imaplib.IMAP4_SSL(host, port)
+        M.login(user, password)
+        return M
+
+    def delete_by_uid(self, host: str, port: int, user: str, password: str, mailbox: str, uids: Iterable[int]) -> int:
+        if not uids:
+            return 0
+        M = self._login(host, port, user, password)
+        try:
+            M.select(mailbox or "INBOX")
+            # mark each UID as \Deleted
+            for uid in uids:
+                M.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
+            # expunge once per mailbox batch
+            M.expunge()
+            return len(list(uids))
+        finally:
+            try: M.close()
+            except: pass
+            M.logout()
+
+    def delete_by_message_id(self, host: str, port: int, user: str, password: str, mailbox: str, message_ids: Iterable[str]) -> int:
+        if not message_ids:
+            return 0
+        M = self._login(host, port, user, password)
+        deleted = 0
+        try:
+            M.select(mailbox or "INBOX")
+            for mid in message_ids:
+                # Search by exact Message-ID (quotes required)
+                typ, data = M.search(None, '(HEADER Message-ID "{}")'.format(mid))
+                if typ == "OK" and data and data[0]:
+                    for msg_id in data[0].split():
+                        M.store(msg_id, "+FLAGS", r"(\Deleted)")
+                        deleted += 1
+            M.expunge()
+            return deleted
+        finally:
+            try: M.close()
+            except: pass
+            M.logout()

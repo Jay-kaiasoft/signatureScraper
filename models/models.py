@@ -11,7 +11,7 @@ Status semantics for EmailFetchRequest:
 
 from datetime import datetime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import String, Integer, Text, DateTime, ForeignKey
+from sqlalchemy import String, Integer, Text, DateTime, ForeignKey ,Boolean
 
 class Base(DeclarativeBase):
     pass
@@ -40,12 +40,17 @@ class EmailFetchRequest(Base):
     results: Mapped[list["SignatureResult"]] = relationship(
         back_populates="request", cascade="all, delete-orphan"
     )
-
+# models.py  (add the 3 fields shown)
 class SignatureResult(Base):
     __tablename__ = "temp_mail"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     request_id: Mapped[int] = mapped_column(ForeignKey("email_scraping_requests.id"), index=True)
+
+    # NEW: identifiers for later deletion
+    message_uid: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # IMAP UID
+    message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)  # RFC822 Message-ID
+    mailbox: Mapped[str | None] = mapped_column(String(128), default="INBOX", nullable=True)
 
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -55,8 +60,16 @@ class SignatureResult(Base):
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+      # ✅ use SQLAlchemy Boolean, not Python bool
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,            # Python-side default
+        # server_default=sa.text("0"),  # uncomment in migration for MySQL
+    )
 
     created_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     created_by: Mapped[int] = mapped_column(ForeignKey("customers.cus_id"), index=True)
-    
+
     request: Mapped[EmailFetchRequest] = relationship(back_populates="results")
+

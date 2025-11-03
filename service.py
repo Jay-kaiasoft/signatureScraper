@@ -1,14 +1,3 @@
-# service.py
-"""
-Standalone MailScraper service.
-- Loads settings from .env
-- Every POLL_SECONDS, finds EmailFetchRequest with status=0
-- Sets status=2 (running), scrapes IMAP, stores SignatureResult rows
-  (propagating created_by from EmailFetchRequest), then sets status=1
-- On failure sets status=-1 with last_error
-- Once a day, deletes SignatureResult older than RESULT_RETENTION_DAYS
-"""
-
 import os
 import sys
 import time
@@ -127,6 +116,9 @@ def save_results(job_id: int, results: list[dict]):
             row = SignatureResult(
                 request_id=job_id,
                 created_by=req.created_by,  # ✅ propagate created_by from parent
+                message_uid=r.get("uid"),
+                message_id=r.get("messageId"),
+                mailbox=r.get("mailbox") or "INBOX",
                 email=r.get("emailAddress"),
                 company_name=r.get("companyName"),
                 job_title=r.get("jobTitle"),
@@ -134,9 +126,98 @@ def save_results(job_id: int, results: list[dict]):
                 address=r.get("address"),
                 website=r.get("website"),
                 first_name=r.get("firstName"),
-                last_name=r.get("lastName") 
+                last_name=r.get("lastName"),
+                is_deleted=False
             )
             s.add(row)
+
+def purge_deleted_results():
+    """
+    For each SignatureResult marked is_deleted=True, delete the original email
+    from the user's mailbox using credentials stored on the parent EmailFetchRequest.
+    """
+    print("[PURGE] Checking for messages to delete...")
+
+    # 1) Load all flagged rows + their request details in one pass
+    with session_scope() as s:
+        rows = (
+            s.execute(
+                select(SignatureResult, EmailFetchRequest)
+                .join(EmailFetchRequest, SignatureResult.request_id == EmailFetchRequest.id)
+                .where(SignatureResult.is_deleted == True)  # noqa: E712
+            )
+            .all()
+        )
+
+    if not rows:
+        print("[PURGE] Nothing to delete.")
+        return
+
+    # 2) Group by (request_id, mailbox) for efficient logins
+    from collections import defaultdict
+    groups = defaultdict(lambda: {"req": None, "uids": [], "mids": [], "mailbox": "INBOX"})
+
+    for sig, req in rows:
+        key = (sig.request_id, sig.mailbox or "INBOX")
+        g = groups[key]
+        g["req"] = req
+        g["mailbox"] = sig.mailbox or "INBOX"
+        if sig.message_uid is not None:
+            g["uids"].append(sig.message_uid)
+        elif sig.message_id:
+            g["mids"].append(sig.message_id)
+
+    total_deleted = 0
+
+    # 3) Execute deletions per group
+    for (req_id, mailbox), g in groups.items():
+        req: EmailFetchRequest = g["req"]
+        uids = g["uids"]
+        mids = g["mids"]
+        mbx = g["mailbox"]
+
+        try:
+            deleted_here = 0
+            if uids:
+                deleted_here += scraper.delete_by_uid(
+                    host=req.imap_host,
+                    port=req.imap_port or 993,
+                    user=req.email,
+                    password=req.password,
+                    mailbox=mbx,
+                    uids=uids,
+                )
+            if mids:
+                deleted_here += scraper.delete_by_message_id(
+                    host=req.imap_host,
+                    port=req.imap_port or 993,
+                    user=req.email,
+                    password=req.password,
+                    mailbox=mbx,
+                    message_ids=mids,
+                )
+            print(f"[PURGE] Request {req_id} @{mbx} — deleted {deleted_here} messages.")
+            total_deleted += deleted_here
+
+            # 4) DB cleanup for the purged SignatureResult rows
+            #    Option A: hard-delete the signature rows
+            with session_scope() as s:
+                stmt = (
+                    select(SignatureResult.id)
+                    .where(SignatureResult.request_id == req_id, SignatureResult.is_deleted == True)  # noqa: E712
+                )
+                ids = [r[0] for r in s.execute(stmt).all()]
+                if ids:
+                    s.execute(
+                        delete(SignatureResult).where(SignatureResult.id.in_(ids))
+                    )
+
+            #    Option B (alternative): just mark them with purged_at instead of deleting
+
+        except Exception as e:
+            print(f"[PURGE] Error purging request {req_id} @{mbx}: {type(e).__name__}: {e}")
+
+    print(f"[PURGE] Total deleted this cycle: {total_deleted}")
 
 
 # -------------------------
@@ -203,26 +284,22 @@ def main():
 
     while not _shutdown:
         try:
-            # 1) Pick pending jobs
             jobs = pick_pending_jobs(limit=MAX_JOBS_PER_CYCLE if MAX_JOBS_PER_CYCLE > 0 else None)
-
-            # 2) Process each job sequentially
-            if not jobs:
-                # No jobs – still keep daily cleanup schedule
-                pass
-            else:
+            if jobs:
                 for job in jobs:
                     if _shutdown:
                         break
                     process_job(job)
 
-            # 3) Daily cleanup schedule (every 24h)
+            # NEW: run purge pass every cycle (POLL_SECONDS defaults to 60)
+            purge_deleted_results()
+
+            # Daily cleanup (already in your code)
             now = datetime.utcnow()
             if (now - _last_cleanup).total_seconds() >= 86400:
                 cleanup_old_results()
                 _last_cleanup = now
 
-            # 4) Sleep until next polling
             time.sleep(POLL_SECONDS)
 
         except SQLAlchemyError as db_err:
