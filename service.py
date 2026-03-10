@@ -190,8 +190,6 @@ def purge_deleted_results():
         print(f"[PURGE] Deleted {len(deleted_sig_ids)} rows from DB")
 
 
-
-
 # -------------------------
 # Job processing
 # -------------------------
@@ -286,3 +284,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # //python .\service.py
