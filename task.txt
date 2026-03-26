@@ -1,0 +1,10 @@
+1) Convert java_code/TodoAssignServiceImpl.java into python service which is todo_mail_service.py only convert this methods (sendTaskReminder,sendTaskAssignedEmail,sendDueSoonReminderEmail,sendDueTodayReminderEmail,sendPastDueReminderEmail).
+2) Here sendTaskReminder method is main function which is run on every 24HR now change all logic for sendTaskReminder remove this all Args (Integer userId, Integer todoId, Integer assignId) and do this logic
+    --- 1. Fetch all todos from todos table
+    --- 2. Match all todos due_date with today date
+    --- 3. If due_date is today date then use sendDueTodayReminderEmail
+    --- 4. If due_date is Due Soon (2 days before) then use sendDueSoonReminderEmail
+    --- 5. If due_date is Past Due (1 day after missed) then use sendPastDueReminderEmail
+3) Use .env file for Email Configuration
+4) Use mysql.connector for database connection
+5) todo_mail_service.py should be run and only sendTaskReminder is main method which is run on every 24HR

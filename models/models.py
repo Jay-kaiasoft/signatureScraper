@@ -20,6 +20,8 @@ class Customers(Base):
     __tablename__ = "customers"
 
     cus_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(25), nullable=True)
+    email_address: Mapped[str] = mapped_column(String(50), nullable=True)
 
 class EmailFetchRequest(Base):
     __tablename__ = "email_scraping_requests"
@@ -72,4 +74,45 @@ class SignatureResult(Base):
     created_by: Mapped[int] = mapped_column(ForeignKey("customers.cus_id"), index=True)
 
     request: Mapped[EmailFetchRequest] = relationship(back_populates="results")
+
+class TeamDetails(Base):
+    __tablename__ = "team_details"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+class Todo(Base):
+    __tablename__ = "todo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, name="todo_id")
+    related_to: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    task: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_deleted: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("customers.cus_id"), nullable=True)
+    complected_work: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    priority: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Relationships
+    creator: Mapped["Customers"] = relationship(foreign_keys=[created_by])
+    assignees: Mapped[list["TodoAssign"]] = relationship(back_populates="todo_rel")
+
+class TodoAssign(Base):
+    __tablename__ = "todo_assignees"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, name="todo_ass_id")
+    todo_id: Mapped[int | None] = mapped_column(ForeignKey("todo.todo_id"), nullable=True)
+    cus_id_assignee: Mapped[int | None] = mapped_column(ForeignKey("customers.cus_id"), nullable=True)
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("team_details.id"), nullable=True)
+    assign_by: Mapped[int | None] = mapped_column(ForeignKey("customers.cus_id"), nullable=True)
+    complected_work: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    priority: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Relationships
+    todo_rel: Mapped["Todo"] = relationship(back_populates="assignees")
+    assignee: Mapped["Customers"] = relationship(foreign_keys=[cus_id_assignee])
+    assigner: Mapped["Customers"] = relationship(foreign_keys=[assign_by])
+    team: Mapped["TeamDetails"] = relationship()
 
