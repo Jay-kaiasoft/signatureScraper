@@ -1,3 +1,4 @@
+import logger_config
 import os
 import sys
 import time
@@ -15,6 +16,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from db import session_scope  # your SessionLocal context manager
 from models.models import EmailFetchRequest, SignatureResult  # your models
 from imap_scraper import IMAPScraper  # your IMAP logic
+
+import logging
+logger = logging.getLogger(__name__)
 
 # -------------------------
 # Config
@@ -37,7 +41,7 @@ def handle_sigterm(signum, frame):
     """Graceful shutdown on Ctrl+C / SIGTERM."""
     global _shutdown
     _shutdown = True
-    print("[SYS] Received shutdown signal. Exiting gracefully...")
+    logger.info("[SYS] Received shutdown signal. Exiting gracefully...")
 
 
 signal.signal(signal.SIGINT, handle_sigterm)
@@ -109,7 +113,7 @@ def save_results(job_id: int, results: list[dict]):
         # Load the parent to grab created_by
         req = s.get(EmailFetchRequest, job_id)
         if not req:
-            print(f"[WARN] EmailFetchRequest id={job_id} not found; skipping save.")
+            logger.info(f"[WARN] EmailFetchRequest id={job_id} not found; skipping save.")
             return
         
         for r in results:
@@ -132,7 +136,7 @@ def save_results(job_id: int, results: list[dict]):
             s.add(row)
 
 def purge_deleted_results():
-    print("[PURGE] Checking for messages to delete...")
+    logger.info("[PURGE] Checking for messages to delete...")
 
     # Step 1: read everything we need first
     with session_scope() as s:
@@ -160,7 +164,7 @@ def purge_deleted_results():
             })
 
     if not payload:
-        print("[PURGE] Nothing to delete.")
+        logger.info("[PURGE] Nothing to delete.")
         return
 
     # Step 2: group and delete from IMAP
@@ -181,13 +185,13 @@ def purge_deleted_results():
                 )
             deleted_sig_ids.append(item["sig_id"])
         except Exception as e:
-            print(f"[PURGE] Error deleting message {item['uid'] or item['mid']}: {e}")
+            logger.info(f"[PURGE] Error deleting message {item['uid'] or item['mid']}: {e}")
 
     # Step 3: delete successfully purged rows from DB
     if deleted_sig_ids:
         with session_scope() as s:
             s.query(SignatureResult).filter(SignatureResult.id.in_(deleted_sig_ids)).delete(synchronize_session=False)
-        print(f"[PURGE] Deleted {len(deleted_sig_ids)} rows from DB")
+        logger.info(f"[PURGE] Deleted {len(deleted_sig_ids)} rows from DB")
 
 
 # -------------------------
@@ -198,11 +202,11 @@ def process_job(job: EmailFetchRequest):
     Run one job: mark running, fetch via IMAP, save results, mark done.
     Handles exceptions and marks failed.
     """
-    print(f"[JOB {job.id}] Start — {job.email} @ {job.imap_host}:{job.imap_port} (max={job.max_messages})")
+    logger.info(f"[JOB {job.id}] Start — {job.email} @ {job.imap_host}:{job.imap_port} (max={job.max_messages})")
 
     # Attempt to acquire "lock" by transitioning 0 -> 2.
     if not mark_running(job.id):
-        print(f"[JOB {job.id}] Skipped — not pending anymore (possibly picked by another worker).")
+        logger.info(f"[JOB {job.id}] Skipped — not pending anymore (possibly picked by another worker).")
         return
 
     try:
@@ -215,10 +219,10 @@ def process_job(job: EmailFetchRequest):
         )
         save_results(job.id, results)
         mark_done(job.id)
-        print(f"[JOB {job.id}] Done — saved {len(results)} signature(s).")
+        logger.info(f"[JOB {job.id}] Done — saved {len(results)} signature(s).")
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
-        print(f"[JOB {job.id}] FAILED — {err}")
+        logger.info(f"[JOB {job.id}] FAILED — {err}")
         mark_failed(job.id, err)
 
 
@@ -230,13 +234,13 @@ def cleanup_old_results():
     Delete SignatureResult records older than RETENTION_DAYS based on created_date.
     """
     cutoff = datetime.utcnow() - timedelta(days=RETENTION_DAYS)
-    print(f"[CLEANUP] Removing SignatureResult older than {RETENTION_DAYS} day(s) (cutoff: {cutoff:%Y-%m-%d %H:%M:%S} UTC)")
+    logger.info(f"[CLEANUP] Removing SignatureResult older than {RETENTION_DAYS} day(s) (cutoff: {cutoff:%Y-%m-%d %H:%M:%S} UTC)")
 
     with session_scope() as s:
         stmt = delete(SignatureResult).where(SignatureResult.created_date < cutoff)
         result = s.execute(stmt)
         deleted = result.rowcount or 0
-        print(f"[CLEANUP] Deleted {deleted} record(s).")
+        logger.info(f"[CLEANUP] Deleted {deleted} record(s).")
 
 
 # -------------------------
@@ -245,8 +249,8 @@ def cleanup_old_results():
 def main():
     global _last_cleanup
 
-    print("[SYS] MailScraper service started.")
-    print(f"[SYS] Poll every {POLL_SECONDS}s | Max jobs/cycle: {MAX_JOBS_PER_CYCLE or '∞'} | Retention: {RETENTION_DAYS} day(s)")
+    logger.info("[SYS] MailScraper service started.")
+    logger.info(f"[SYS] Poll every {POLL_SECONDS}s | Max jobs/cycle: {MAX_JOBS_PER_CYCLE or '∞'} | Retention: {RETENTION_DAYS} day(s)")
 
     # First cleanup on startup
     _last_cleanup = datetime.utcnow()
@@ -273,13 +277,13 @@ def main():
             time.sleep(POLL_SECONDS)
 
         except SQLAlchemyError as db_err:
-            print(f"[DB ERROR] {db_err}")
+            logger.info(f"[DB ERROR] {db_err}")
             time.sleep(POLL_SECONDS)
         except Exception as e:
-            print(f"[ERROR] {type(e).__name__}: {e}")
+            logger.info(f"[ERROR] {type(e).__name__}: {e}")
             time.sleep(POLL_SECONDS)
 
-    print("[SYS] MailScraper service stopped.")
+    logger.info("[SYS] MailScraper service stopped.")
 
 
 if __name__ == "__main__":

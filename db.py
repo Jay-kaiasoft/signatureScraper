@@ -3,12 +3,14 @@
 Creates the SQLAlchemy engine and a scoped session factory.
 Reads settings from .env (DATABASE_URL).
 """
-
+import logger_config
 import os
 from contextlib import contextmanager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+import logging
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -34,10 +36,10 @@ def session_scope():
     try:
         yield session
         session.commit()
-        print("DB session committed")
+        logger.info("DB session committed")
     except Exception:
         session.rollback()
-        print("DB session rolled back")
+        logger.info("DB session rolled back")
         raise
     finally:
         session.close()

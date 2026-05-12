@@ -1,8 +1,11 @@
+import logger_config
 import json
 import random
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import logging
+logger = logging.getLogger(__name__)
 
 # Load messages from JSON
 with open("messages.json", "r", encoding="utf-8") as f:
@@ -10,8 +13,8 @@ with open("messages.json", "r", encoding="utf-8") as f:
 
 fromEmails = [
     {
-        "email": "webzoidsolution@gmail.com",
-        "password": "fdee tasv dsop rzwr",
+        "email": "360pipeinc@gmail.com",
+        "password": "omdd qgaj bgpi qjzy",
         "protocol": "imaps",
         "smtpServer": "smtp.gmail.com",      # SMTP, not IMAP
         "smtpPort": 465,
@@ -50,9 +53,9 @@ def send_html_email(subject, html_content, from_email, password, to_email, smtp_
         server.login(from_email, password)
         server.sendmail(from_email, [to_email], msg.as_string())
         server.quit()
-        print(f"Email sent from {from_email} to {to_email}")
+        logger.info(f"Email sent from {from_email} to {to_email}")
     except Exception as e:
-        print(f"Failed to send email from {from_email} to {to_email}: {e}")
+        logger.info(f"Failed to send email from {from_email} to {to_email}: {e}")
 
 # Main loop
 for sender in fromEmails:
